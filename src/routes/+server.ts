@@ -2,159 +2,157 @@ import type { RequestHandler } from './$types';
 import { json } from '@sveltejs/kit';
 import { DAB_EMAIL, DAB_PASSWORD } from '$env/static/private';
 
+// --- Interfaces (Optional but Recommended) ---
+interface QobuzTrack { id: number; isrc: string; }
+interface QobuzResponse { data?: { tracks?: { items: QobuzTrack[] } } }
+interface DabTrack { id: number; isrc?: string; audioQuality: { maximumBitDepth: number; maximumSampleRate: number; }; [key: string]: any; }
+interface DabSearchResponse { tracks: DabTrack[]; }
+interface DabLibrary { id: string; }
+interface DabLibraryResponse { library: DabLibrary; }
+interface Result { success: boolean; trackId?: number; error?: string; }
+
+// --- Helper: Find Best Track ---
+function findBestDabTrack(tracks: DabTrack[]): DabTrack | null {
+    if (!tracks || tracks.length === 0) return null;
+    return tracks.reduce((best: DabTrack | null, current: DabTrack) => {
+        if (!best) return current;
+        // Prioritize Sample Rate, then Bit Depth
+        if (current.audioQuality.maximumSampleRate > best.audioQuality.maximumSampleRate) return current;
+        if (current.audioQuality.maximumSampleRate === best.audioQuality.maximumSampleRate &&
+            current.audioQuality.maximumBitDepth > best.audioQuality.maximumBitDepth) return current;
+        return best;
+    }, null);
+}
+
+
 export const POST: RequestHandler = async ({ request }) => {
-    // Process the POST request data
-    let data;
+    let isrcs: string[];
     try {
-        data = await request.json();
-        if (!data || !Array.isArray(data) || data.length === 0) {
-            return json({ success: false, message: 'Invalid data format. Give me a JSON array of ISRCs.', url: "" }, { status: 400 });
+        isrcs = await request.json();
+        if (!Array.isArray(isrcs) || isrcs.length === 0 || !isrcs.every(item => typeof item === 'string')) {
+            return json({ success: false, message: 'Invalid data format. Expected a non-empty JSON array of ISRC strings.', url: "" }, { status: 400 });
         }
     } catch (e) {
         return json({ success: false, message: 'Invalid JSON', url: "" }, { status: 400 });
     }
-    console.log('Received POST request', data);
-    
-    let allSuccess = true;
-    let libraryID = "";
-    // Login to DAB
-    return fetch('https://dab.yeet.su/api/auth/login', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'isrcbot/1.0.0'
-        },
-        body: JSON.stringify({
-            email: DAB_EMAIL, 
-            password: DAB_PASSWORD
-        }),
-    }).then(response => {
-        if (!response.ok) {
-            throw new Error('Error logging in to DAB: ' + response.statusText);
-        }
-        const cookies = response.headers.getSetCookie();
-        // Return the first cookie string, or null if none exist
-        return cookies.length > 0 ? cookies[0] : null;
-    }).then(dabCookie => { // dabCookie is string | null
-        if (!dabCookie) { // Check for null or empty string
-            throw new Error('No valid cookie found in response');
-        }
-        // At this point, dabCookie is guaranteed to be a non-empty string
-        let dabSessionCookie = dabCookie.split(';').find(cookie => cookie.startsWith('session='));
-        if (!dabSessionCookie) {
-            throw new Error('Session cookie not found in response');
-        }
-        // Pass the session cookie to the next step
-        return dabSessionCookie;
-    }).then(dabSessionCookie => {
-        // Create a new library
-        let currentDate = new Date();
-        return fetch('https://dab.yeet.su/api/libraries', {
+    console.log(`Received POST request for ${isrcs.length} ISRCs.`);
+
+    let dabSessionCookie: string | null = null;
+    let libraryId: string | null = null;
+    const results: Record<string, Result> = {};
+
+    try {
+        // --- 1. Login to DAB ---
+        console.log('Attempting DAB login...');
+        const loginResponse = await fetch('https://dab.yeet.su/api/auth/login', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': 'isrcbot/1.0.0',
-                'Cookie': dabSessionCookie // Use the session cookie here
-            },
+            headers: { 'Content-Type': 'application/json', 'User-Agent': 'isrcbot/1.0.0' },
+            body: JSON.stringify({ email: DAB_EMAIL, password: DAB_PASSWORD }),
+        });
+
+        if (!loginResponse.ok) throw new Error(`DAB Login failed: ${loginResponse.status} ${loginResponse.statusText}`);
+
+        const cookies = loginResponse.headers.getSetCookie();
+        const sessionCookieHeader = cookies.find(cookie => cookie.trim().startsWith('session='));
+        if (!sessionCookieHeader) throw new Error('DAB session cookie not found.');
+        dabSessionCookie = sessionCookieHeader; // Store the full header string
+        console.log('DAB Login successful.');
+
+        // --- 2. Create Library ---
+        console.log('Creating DAB library...');
+        const currentDate = new Date();
+        const createLibraryResponse = await fetch('https://dab.yeet.su/api/libraries', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'User-Agent': 'isrcbot/1.0.0', 'Cookie': dabSessionCookie },
             body: JSON.stringify({
-                name: currentDate.getTime().toString(),
-                description: `Auto-generated by isrcbot on ${currentDate.toString()}`,
+                name: `ISRCs ${currentDate.toISOString()}`,
+                description: `Auto-generated by isrcbot on ${currentDate.toDateString()}`,
                 isPublic: true,
             })
-        }).then(response => {
-            if (!response.ok) {
-                throw new Error('Error creating library: ' + response.statusText);
-            }
-            return response.json();
-        }).then(data => {
-            return {
-                res: data,
-                cookie: dabSessionCookie
-            };
         });
-    }).then(dabSessionCookie => { // Use dabSessionCookie here
-        // console.log('DAB Session Cookie:', dabSessionCookie);
-        // console.log(dabSessionCookie.res.library)
-        libraryID = dabSessionCookie.res.library.id;
-        // console.log('Library ID:', libraryID);
-        // Validate ISRCs
-        data.forEach((isrc: string) => {
-            fetch(`https://eu.qobuz.squid.wtf/api/get-music?q=${isrc}&offset=0&limit=0`)
-                .then(response => {
-                    if (!response.ok) {
-                        return json({ success: false, message: 'Error fetching data from Qobuz', url: "" }, { status: 500 });
-                    }
-                    return response.json();
-                }).then(data => {
-                    let tracks = [];
-                    if (!data.data.tracks) {
-                        allSuccess = false;
-                        console.error('Error fetching data from Qobuz:', data);
-                    } else {
-                        tracks = data.data.tracks.items;
-                        let correctTracks = tracks.filter((track: any) => track.isrc === isrc);
-                        let trackIds = correctTracks.map((track: any) => track.id);
-                        // Cross reference with DAB to make sure right track is selected
-                        fetch(`https://dab.yeet.su/api/search?q=${isrc}&offset=0&type=track`)
-                            .then(response => {
-                                if (!response.ok) {
-                                    allSuccess = false;
-                                    console.error('Error fetching data from Dab:', response.statusText);
-                                }
-                                return response.json();
-                            }).then(data => {
-                                let tracks = data.tracks;
-                                // console.log('Tracks from Dab:', tracks);
-                                let correctTracks = tracks.filter((track: any) => trackIds.includes(track.id));
-                                // console.log('Correct tracks:', correctTracks);
-                                // Find the track with highest audio quality
-                                let bestTrack = correctTracks.reduce((best: any, track: any) => {
-                                    if (!best || (track.audioQuality.maximumBitDepth > best.audioQuality.maximumBitDepth)) {
-                                        return track;
-                                    } else if (track.audioQuality.maximumBitDepth === best.audioQuality.maximumBitDepth) {
-                                        if (track.audioQuality.maximumSampleRate > best.audioQuality.maximumSampleRate) {
-                                            return track;
-                                        }
-                                    }
-    
-                                    // If there is no new best track, return the current best
-                                    return best;
-                                }, null);
-                                // console.log('Best track:', bestTrack);
-                                // Add the track to the library
-                                fetch(`https://dab.yeet.su/api/libraries/${dabSessionCookie.res.library.id}/tracks`, {
-                                    method: 'POST',
-                                    headers: {
-                                        'Content-Type': 'application/json',
-                                        'User-Agent': 'isrcbot/1.0.0',
-                                        'Cookie': dabSessionCookie.cookie // Use the session cookie here
-                                    },
-                                    body: JSON.stringify({
-                                        track: bestTrack
-                                    })
-                                // console.log('Track IDs:', trackIds);
-                                }).catch(error => {
-                                    allSuccess = false;
-                                    console.error('Error fetching data from Dab:', error);
-                                });
-                            });
-                    }
-                })
-        });
-    }).then(_ => {
-        if (!allSuccess) {
-            return json({ success: true, message: 'Error processing some tracks', url: `https://dab.yeet.su/shared/library/${libraryID}` });
+
+        if (!createLibraryResponse.ok) {
+            const errorBody = await createLibraryResponse.text();
+            console.error("Create library error body:", errorBody);
+            throw new Error(`Error creating library: ${createLibraryResponse.status} ${createLibraryResponse.statusText}`);
         }
-        return json({ success: true, message: 'All tracks processed', url: `https://dab.yeet.su/shared/library/${libraryID}` });
-    }).catch(_ => {
-        return json({ success: false, message: 'Internal Server Error', url: "" }, { status: 500 });
-    });
-    
 
+        const libraryData: DabLibraryResponse = await createLibraryResponse.json();
+        libraryId = libraryData.library.id;
+        if (!libraryId) throw new Error('Library ID not found in response.');
+        console.log(`DAB Library created with ID: ${libraryId}`);
 
+        // --- 3. Process ISRCs Concurrently ---
+        const processingPromises = isrcs.map(async (isrc): Promise<void> => {
+            try {
+                // a. Fetch from Qobuz
+                const qobuzResponse = await fetch(`https://eu.qobuz.squid.wtf/api/get-music?q=${isrc}&offset=0&limit=20`); // Use limit > 0
+                if (!qobuzResponse.ok) throw new Error(`Qobuz API error: ${qobuzResponse.status}`);
+                const qobuzData: QobuzResponse = await qobuzResponse.json();
+                const qobuzTracks = qobuzData?.data?.tracks?.items ?? [];
+                const correctQobuzTracks = qobuzTracks.filter(track => track.isrc === isrc);
+                const qobuzTrackIds = correctQobuzTracks.map(track => track.id);
+                if (qobuzTrackIds.length === 0) throw new Error('No matching track found on Qobuz.');
 
+                // b. Search on DAB
+                // Note: DAB search might not directly support ISRC search well, might need track title/artist?
+                // Assuming search by ISRC works for now.
+                const dabSearchResponse = await fetch(`https://dab.yeet.su/api/search?q=${isrc}&offset=0&type=track&limit=50`, {
+                    headers: { 'User-Agent': 'isrcbot/1.0.0', 'Cookie': dabSessionCookie }
+                });
+                if (!dabSearchResponse.ok) throw new Error(`DAB Search API error: ${dabSearchResponse.status}`);
+                const dabSearchData: DabSearchResponse = await dabSearchResponse.json();
+                const dabTracks = dabSearchData.tracks ?? [];
 
-    // Return a response
-    // console.log(libraryID);
-    
+                // c. Filter DAB tracks by Qobuz IDs & Find Best
+                const matchingDabTracks = dabTracks.filter(track => qobuzTrackIds.includes(track.id));
+                const bestTrack = findBestDabTrack(matchingDabTracks);
+                if (!bestTrack) throw new Error('No matching track found on DAB or quality selection failed.');
+
+                // d. Add Best Track to Library
+                const addTrackResponse = await fetch(`https://dab.yeet.su/api/libraries/${libraryId}/tracks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'User-Agent': 'isrcbot/1.0.0', 'Cookie': dabSessionCookie },
+                    body: JSON.stringify({ track: bestTrack }) // Send the whole track object as per previous attempt
+                });
+                if (!addTrackResponse.ok) {
+                     const errorBody = await addTrackResponse.text();
+                     console.error(`Add track error body for ${isrc} (Track ID ${bestTrack.id}):`, errorBody);
+                     throw new Error(`Failed to add track ${bestTrack.id} to library: ${addTrackResponse.status}`);
+                }
+
+                results[isrc] = { success: true, trackId: bestTrack.id };
+                console.log(`Successfully processed ISRC: ${isrc}, Added Track ID: ${bestTrack.id}`);
+
+            } catch (error: any) {
+                console.error(`Failed to process ISRC ${isrc}:`, error.message);
+                results[isrc] = { success: false, error: error.message || 'Unknown processing error.' };
+            }
+        });
+
+        // Wait for all processing promises to settle
+        await Promise.all(processingPromises);
+
+        // --- 4. Determine Final Response ---
+        const allSucceeded = Object.values(results).every(result => result.success);
+        const someSucceeded = Object.values(results).some(result => result.success);
+        const finalUrl = `https://dab.yeet.su/shared/library/${libraryId}`;
+
+        console.log('Processing complete. Results:', results);
+
+        if (allSucceeded) {
+            return json({ success: true, message: 'All ISRCs processed successfully.', url: finalUrl, results: results });
+        } else if (someSucceeded) {
+            // Return 200 OK but indicate partial failure
+            return json({ success: false, message: 'Some ISRCs failed to process.', url: finalUrl, results: results }, { status: 200 });
+        } else {
+            // All failed after library creation
+            return json({ success: false, message: 'Failed to process all ISRCs.', url: finalUrl, results: results }, { status: 500 });
+        }
+
+    } catch (error: any) {
+        // Catch errors from login or library creation phase
+        console.error('Critical error during setup:', error);
+        return json({ success: false, message: error.message || 'Internal Server Error during setup.', url: "" }, { status: 500 });
+    }
 };
