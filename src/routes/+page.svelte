@@ -142,7 +142,7 @@ USRC87654321
 		font-family: 'Inter', sans-serif;
 	}
 
-	body {
+	:global(body) {
 		background-color: var(--bg-color);
 		color: var(--text-color);
 		margin: 0;
