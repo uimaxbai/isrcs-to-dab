@@ -87,8 +87,9 @@ export const POST: RequestHandler = async ({ request }) => {
             try {
                 // a. Fetch from Qobuz
                 const qobuzResponse = await fetch(`https://eu.qobuz.squid.wtf/api/get-music?q=${isrc}&offset=0&limit=20`); // Use limit > 0
-                if (!qobuzResponse.ok) throw new Error(`Qobuz API error: ${qobuzResponse.status}`);
+                
                 const qobuzData: QobuzResponse = await qobuzResponse.json();
+                if (!qobuzResponse.ok) throw new Error(`Qobuz API error: ${qobuzResponse.status}, ${qobuzData}`);
                 const qobuzTracks = qobuzData?.data?.tracks?.items ?? [];
                 const correctQobuzTracks = qobuzTracks.filter(track => track.isrc === isrc);
                 const qobuzTrackIds = correctQobuzTracks.map(track => track.id);
