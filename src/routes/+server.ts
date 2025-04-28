@@ -86,7 +86,7 @@ export const POST: RequestHandler = async ({ request }) => {
         const processingPromises = isrcs.map(async (isrc): Promise<void> => {
             try {
                 // a. Fetch from Qobuz
-                const qobuzResponse = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(`https://eu.qobuz.squid.wtf/api/get-music?q=${isrc}&offset=0&limit=20')}`)}`); // Use limit > 0
+                const qobuzResponse = await fetch(`https://eu.qobuz.squid.wtf/api/get-music?q=${isrc}&offset=0&limit=20`); // Use limit > 0
                 if (!qobuzResponse.ok) throw new Error(`Qobuz API error: ${qobuzResponse.status}`);
                 const qobuzData: QobuzResponse = await qobuzResponse.json();
                 const qobuzTracks = qobuzData?.data?.tracks?.items ?? [];
